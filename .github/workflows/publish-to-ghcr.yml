@@ -1,0 +1,414 @@
+name: 🐳 publish-to-ghcr
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    # 每天北京时间上午 10 点 (UTC 2 点) 自动执行一次检查并构建
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      komari_version:
+        description: "指定上游版本号 (留空则自动获取上游最新版)"
+        required: false
+        default: ""
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🧭 Set image metadata
+        id: meta
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+          # 判断版本号逻辑：
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.komari_version }}" ]; then
+            # 1. 如果是手动触发且输入了版本号，就用手填的
+            VERSION="${{ github.event.inputs.komari_version }}"
+          else
+            # 2. 否则（代码推送 或 定时任务），自动调用 GitHub API 获取上游最新 Release
+            VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/komari-monitor/komari/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            # 容错：如果 /releases/latest 获取失败，尝试 /releases?per_page=1
+            if [ -z "$VERSION" ]; then
+              VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/komari-monitor/komari/releases?per_page=10" \
+                | python3 -c "
+              import json,sys
+              d=json.load(sys.stdin)
+              if isinstance(d,list):
+                  for r in d:
+                      if 'snapshot' not in r.get('tag_name','').lower():
+                          print(r.get('tag_name',''))
+                          break
+              " 2>/dev/null)
+            fi
+            # 如果仍然获取失败，跳过构建
+            if [ -z "$VERSION" ]; then
+              echo "错误：无法获取上游最新版本号，跳过构建"
+              echo "SKIP_BUILD=true" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          echo "本次构建对应的上游版本为: ${VERSION:-（无）}"
+          echo "KOMARI_VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: 🏷️ Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 🛠️ Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔑 Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: 🔍 检查上游二进制及架构支持
+        run: |
+          PLATFORMS="linux/amd64,linux/arm64"
+
+          # 检查至少 amd64 二进制存在，否则跳过
+          if ! wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-amd64" 2>/dev/null; then
+            echo "上游无对应二进制 komari-linux-amd64 for ${KOMARI_VERSION}，跳过构建"
+            echo "SKIP_BUILD=true" >> "$GITHUB_ENV"
+          else
+            echo "上游二进制存在，继续构建"
+
+            # 386
+            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-386" 2>/dev/null; then
+              PLATFORMS="${PLATFORMS},linux/386"
+              echo "✅ 386: 上游有二进制，加入构建"
+            else
+              echo "⚠️ 386: 跳过（上游无二进制）"
+            fi
+
+            # riscv64 (debian:trixie-slim 支持)
+            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-riscv64" 2>/dev/null; then
+              PLATFORMS="${PLATFORMS},linux/riscv64"
+              echo "✅ riscv64: 上游有二进制，加入构建"
+            else
+              echo "⚠️ riscv64: 跳过（上游无二进制）"
+            fi
+
+            # loong64 (暂无 base 镜像支持，跳过)
+            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-loong64" 2>/dev/null; then
+              echo "⚠️ loong64: 上游有二进制，但无 base 镜像支持，跳过"
+            else
+              echo "⚠️ loong64: 跳过（上游无二进制）"
+            fi
+            echo "PLATFORMS=${PLATFORMS}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 📦 Build and Push (multi-platform)
+        if: env.SKIP_BUILD != 'true'
+        run: |
+          docker buildx build \
+            --platform ${{ env.PLATFORMS }} \
+            --build-arg KOMARI_VERSION=${{ env.KOMARI_VERSION }} \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --provenance=false --sbom=false \
+            -t ${{ env.IMAGE_NAME }}:${{ env.KOMARI_VERSION }} \
+            --push \
+            .
+
+      - name: 🔍 Verify manifest
+        if: success() && env.SKIP_BUILD != 'true'
+        run: |
+          for i in 1 2 3; do
+            sleep 5
+            if docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ env.KOMARI_VERSION }} >/dev/null 2>&1; then
+              echo "✅ Manifest verified"
+              exit 0
+            fi
+            echo "⚠️  Attempt $i: manifest not ready, retrying..."
+          done
+          echo "❌ Manifest verification failed after 3 retries"
+          exit 1
+
+      - name: 📋 Print build report
+        if: success() && env.SKIP_BUILD != 'true'
+        run: |
+          VERSION="${{ env.KOMARI_VERSION }}"
+          IMAGE_NAME="${{ env.IMAGE_NAME }}"
+
+          # Upstream binary support
+          BINS=""
+          for arch in amd64 arm64 arm 386 riscv64 loong64; do
+            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${VERSION}/komari-linux-${arch}" 2>/dev/null; then
+              BINS="${BINS}\`${arch}\`, "
+            fi
+          done
+          BINS="${BINS%, }"
+
+          # Upstream image
+          UP_IMG="❌"
+          docker manifest inspect ghcr.io/komari-monitor/komari:${VERSION} >/dev/null 2>&1 && UP_IMG="✅"
+
+          # Our manifest platforms
+          OURS=$(docker manifest inspect ${IMAGE_NAME}:${VERSION} 2>/dev/null | python3 -c "
+          import json,sys
+          m=json.load(sys.stdin)
+          if isinstance(m,dict) and 'manifests' in m:
+              for p in m['manifests']:
+                  plat=p.get('platform',{})
+                  print('✅ {}/{}'.format(plat.get('os',''), plat.get('architecture','')) + ('/'+plat.get('variant','') if plat.get('variant') else ''))
+          " 2>/dev/null) || OURS="❌"
+
+          echo ""
+          echo "══════════════════════ Build Report ══════════════════════"
+          printf "%-22s │ %s\n" "Version" "${VERSION}"
+          printf "%-22s │ %s\n" "Upstream Image" "${UP_IMG}"
+          printf "%-22s │ %s\n" "Upstream Binaries" "${BINS:---}"
+          echo "──────────────────────────────────────────────────────────"
+          echo "Our Build Platforms:"
+          echo "${OURS}"
+          echo "══════════════════════════════════════════════════════════"
+          echo ""
+          echo "Table Guide:"
+          echo "  Version          - Upstream release version tag"
+          echo "  Upstream Image   - Whether ghcr.io/komari-monitor/komari:VERSION exists"
+          echo "  Upstream Binaries - Which arch binaries upstream GitHub Release provides"
+          echo "  Our Build Platf. - Which platforms in our pushed multi-arch manifest"
+          echo "══════════════════════════════════════════════════════════"
+
+      - name: 🏷️ 设置 latest 标签
+        if: success() && env.KOMARI_VERSION != 'latest' && env.SKIP_BUILD != 'true'
+        run: |
+          IMAGE_NAME="${{ env.IMAGE_NAME }}"
+          BUILD_VERSION="${{ env.KOMARI_VERSION }}"
+
+          # 获取上游最大版本号
+          MAX_VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/komari-monitor/komari/releases?per_page=30" \
+            | python3 -c "
+          import re, sys, json
+          releases = json.load(sys.stdin)
+          def parse(v):
+              m = re.match(r'(\d+)\.(\d+)\.(\d+)', v)
+              return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else (0, 0, 0)
+          best = None
+          for r in releases:
+              tag = r.get('tag_name', '')
+              if 'snapshot' in tag.lower():
+                  continue
+              created = r.get('created_at', '')
+              ver = parse(tag)
+              if best is None or ver > best[0] or (ver == best[0] and created > best[1]):
+                  best = (ver, created, tag)
+          print(best[2] if best else '')
+          ")
+
+          echo "上游最大版本: $MAX_VERSION"
+          echo "本次构建版本: $BUILD_VERSION"
+
+          if [ "$BUILD_VERSION" = "$MAX_VERSION" ]; then
+            echo "本次构建版本是最大版本，设置 latest 标签"
+            docker buildx imagetools create \
+              -t ${IMAGE_NAME}:latest \
+              ${IMAGE_NAME}:${BUILD_VERSION}
+            echo "latest 标签已指向 $BUILD_VERSION"
+          else
+            echo "本次构建版本不是最大版本，不更新 latest 标签"
+          fi
+
+      - name: 🧹 清理旧版本镜像
+        if: success() && env.KOMARI_VERSION != 'latest' && env.SKIP_BUILD != 'true'
+        run: |
+          PACKAGE_NAME=$(echo "${GITHUB_REPOSITORY,,}" | cut -d'/' -f2)
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+          echo "清理包 ${PACKAGE_NAME} 的旧版本..."
+
+          rm -f /tmp/all_versions.json /tmp/page.json
+          echo "[]" > /tmp/all_versions.json
+          PAGE=1
+          while true; do
+            curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/user/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=$PAGE" \
+              > /tmp/page.json
+
+            COUNT=$(python3 -c "import json; d=json.load(open('/tmp/page.json')); print(len(d) if isinstance(d, list) else 0)" 2>/dev/null)
+            if [ -z "$COUNT" ] || [ "$COUNT" -eq 0 ]; then
+              break
+            fi
+
+            python3 -c "
+          import json
+          existing = json.load(open('/tmp/all_versions.json'))
+          new_data = json.load(open('/tmp/page.json'))
+          if isinstance(new_data, list):
+              existing.extend(new_data)
+          json.dump(existing, open('/tmp/all_versions.json', 'w'))
+          "
+
+            PAGE=$((PAGE + 1))
+            if [ "$PAGE" -gt 10 ]; then
+              break
+            fi
+          done
+
+          python3 <<'PYEOF'
+          import json, subprocess, os, base64, urllib.request
+          from collections import Counter
+
+          token = os.environ['TOKEN']
+          package_name = os.environ['PACKAGE_NAME']
+          repo = os.environ.get('REPOSITORY', '').lower()
+          if not repo:
+              repo = f"jyucoeng/{package_name}"
+
+          data = json.load(open('/tmp/all_versions.json'))
+          print(f"共获取 {len(data)} 条版本记录")
+
+          tag_latest = {}
+          untagged = []
+
+          for v in data:
+              if not isinstance(v, dict):
+                  continue
+              tags = v.get('metadata', {}).get('container', {}).get('tags', []) if v.get('metadata') else []
+              vid = v.get('id')
+              created = v.get('created_at', '')
+              digest = v.get('name', '')
+
+              if not tags:
+                  untagged.append((vid, created, digest))
+              else:
+                  for tag in tags:
+                      if tag not in tag_latest or created > tag_latest[tag][1]:
+                          tag_latest[tag] = (vid, created)
+
+          keep_ids = set()
+          for vid, _ in tag_latest.values():
+              keep_ids.add(vid)
+
+          # 查询每个保留的 manifest list 引用的子 manifest digest
+          print("检查被 manifest list 引用的子 manifest...")
+          referenced_digests = set()
+          for tag, (vid, _) in tag_latest.items():
+              if tag == 'latest':
+                  continue
+              try:
+                  auth_str = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+                  req = urllib.request.Request(
+                      f"https://ghcr.io/token?scope=repository:{repo}:pull")
+                  req.add_header("Authorization", f"Basic {auth_str}")
+                  bearer = json.loads(urllib.request.urlopen(req).read())["token"]
+
+                  manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
+                  req = urllib.request.Request(manifest_url)
+                  req.add_header("Authorization", f"Bearer {bearer}")
+                  req.add_header("Accept",
+                      "application/vnd.oci.image.index.v1+json,"
+                      "application/vnd.docker.distribution.manifest.list.v2+json,"
+                      "application/vnd.oci.image.manifest.v1+json,"
+                      "application/vnd.docker.distribution.manifest.v2+json")
+
+                  resp = urllib.request.urlopen(req, timeout=30)
+                  manifest = json.loads(resp.read())
+                  if 'manifests' in manifest:
+                      for m in manifest['manifests']:
+                          referenced_digests.add(m['digest'])
+                  print(f"  ✅ {tag}: 引用 {len(manifest.get('manifests', []))} 个子 manifest")
+              except Exception as e:
+                  print(f"  ⚠️  {tag}: 跳过 - {e}")
+
+          print(f"被引用的子 manifest digest 数: {len(referenced_digests)}")
+
+          # 构建 untagged digest → vid 映射
+          untagged_vid_by_digest = {}
+          for vid, created, digest in untagged:
+              if digest:
+                  untagged_vid_by_digest[digest] = vid
+
+          to_delete = []
+          kept_untagged = 0
+          for v in data:
+              if not isinstance(v, dict):
+                  continue
+              tags = v.get('metadata', {}).get('container', {}).get('tags', []) if v.get('metadata') else []
+              vid = v.get('id')
+              digest = v.get('name', '')
+
+              if not tags:
+                  # untagged: 只删未被 manifest list 引用的 orphan
+                  if digest in referenced_digests:
+                      kept_untagged += 1
+                      continue
+                  to_delete.append(vid)
+                  continue
+
+              if vid in keep_ids:
+                  continue
+              to_delete.append(vid)
+
+          print(f"保留 {len(keep_ids)} 个带标签版本（每个标签最新）")
+          print(f"保留 {kept_untagged} 个被引用的 untagged 版本（平台子 manifest）")
+          print(f"删除 {len(to_delete)} 个无引用的 untagged 或旧版本")
+
+          deleted = 0
+          for vid in to_delete:
+              subprocess.run(
+                  ['curl', '-s', '-X', 'DELETE',
+                   '-H', f'Authorization: token {token}',
+                   f'https://api.github.com/user/packages/container/{package_name}/versions/{vid}'],
+                  capture_output=True
+              )
+              deleted += 1
+              if deleted % 10 == 0:
+                  print(f"  已删除 {deleted} 个...")
+
+          print(f"清理完成，共删除 {deleted} 个")
+
+          print("\n=== 当前各版本镜像数量 ===")
+          tag_counts = Counter()
+          for v in data:
+              if not isinstance(v, dict):
+                  continue
+              vid = v.get('id')
+              if vid in to_delete:
+                  continue
+              tags = v.get('metadata', {}).get('container', {}).get('tags', []) if v.get('metadata') else []
+              real_tags = [t for t in tags if t != 'latest']
+              if real_tags:
+                  for t in real_tags:
+                      tag_counts[t] += 1
+              elif not tags:
+                  tag_counts['(untagged)'] += 1
+
+          latest_version = None
+          for v in data:
+              if not isinstance(v, dict):
+                  continue
+              vid = v.get('id')
+              if vid in to_delete:
+                  continue
+              tags = v.get('metadata', {}).get('container', {}).get('tags', []) if v.get('metadata') else []
+              if 'latest' in tags:
+                  real_tags = [t for t in tags if t != 'latest']
+                  if real_tags:
+                      latest_version = real_tags[0]
+                  break
+
+          for tag, count in sorted(tag_counts.items()):
+              label = f"{tag}(latest)" if tag == latest_version else tag
+              print(f"  {label}: {count} 个")
+          print(f"  总计: {sum(tag_counts.values())} 个")
+          PYEOF
+
+          rm -f /tmp/all_versions.json /tmp/page.json
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ github.event.repository.name }}
+          REPOSITORY: ${{ github.repository }}
