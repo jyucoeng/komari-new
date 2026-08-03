@@ -56,10 +56,10 @@ Caddy (:8001)
 image: ghcr.io/jyucoeng/komari-new:latest
 ```
 
-或指定版本(建议使用1.2.5的版本)：
+或指定版本(建议使用1.3.2的版本)：
 
 ```yaml
-image: ghcr.io/jyucoeng/komari-new:1.2.5
+image: ghcr.io/jyucoeng/komari-new:1.3.2
 ```
 
 镜像地址：`ghcr.io/jyucoeng/komari-new`
@@ -180,16 +180,16 @@ URL: localhost:8001
 | 标签 | 说明 | 适用场景 |
 |---|---|---|
 | `latest` | 始终指向最新版本 | 想要自动获取更新 |
-| `x.y.z`（如 `1.2.5`） | 固定版本号 | 生产环境稳定性优先 |
+| `x.y.z`（如 `1.3.2`） | 固定版本号 | 生产环境稳定性优先 |
 
 **使用固定版本（推荐生产环境）：** [查看支持的指定版本镜像](./allVersion.md)
 
 ```bash
 # Docker Compose
-image: ghcr.io/jyucoeng/komari-new:1.2.5
+image: ghcr.io/jyucoeng/komari-new:1.3.2
 
 # Docker Run
-docker run ... ghcr.io/jyucoeng/komari-new:1.2.5
+docker run ... ghcr.io/jyucoeng/komari-new:1.3.2
 ```
 
 **使用 latest 标签：**
