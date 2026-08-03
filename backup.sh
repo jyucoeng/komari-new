@@ -223,6 +223,14 @@ sqlite_quote() {
     printf "%s" "$1" | sed "s/'/''/g"
 }
 
+db_type_label() {
+    case "${1##*/}" in
+        komari.db)  echo "主数据库" ;;
+        metrics.db) echo "指标数据库" ;;
+        *)          echo "数据库" ;;
+    esac
+}
+
 snapshot_sqlite_files() {
     if ! command -v sqlite3 >/dev/null 2>&1; then
         hint "未找到 sqlite3，数据库文件将使用普通文件快照。"
@@ -261,12 +269,12 @@ snapshot_sqlite_files() {
         if [ "$snapshot_ok" = "1" ]; then
             mv -f "$tmp_db" "$staged_db"
             rm -f "${staged_db}-wal" "${staged_db}-shm" "${staged_db}-journal"
-            hint "已生成 SQLite 一致性快照: $rel_path"
+            hint "已生成 SQLite 一致性快照（$(db_type_label "$rel_path")）: $rel_path"
         else
             rm -f "$tmp_db" 2>/dev/null || true
             # VACUUM INTO 失败（通常是数据库被持续占用），退回到已复制的普通文件快照，
             # 避免因单个数据库锁定而中断整次备份。
-            hint "SQLite 一致性快照失败，使用普通文件快照: $rel_path"
+            hint "SQLite 一致性快照失败，使用普通文件快照（$(db_type_label "$rel_path")）: $rel_path"
         fi
     done < <(find "$DATA_DIR" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print)
 }
