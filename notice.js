@@ -1,22 +1,21 @@
+const TG_TOKEN =  "你自己的tg token";
+const TG_CHAT_ID = "你自己的tg id";
+const PANEL_URL =  "你自己的面板地址（不要忘了带https哟）";
+
 async function sendMessage(message, title, instanceId = null) {
-  // 请把这三个配置改成你自己的
-  const token = "你的tg token";
-  const chatId = "你的chatid";
-  const panelUrl = "你的面板地址，记得带上https";
+  if (!TG_TOKEN || !TG_CHAT_ID) return false;
 
-  if (!token || !chatId) return false;
-
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
 
   // 构建交互按钮
   let inline_keyboard = [];
-  let row1 = [{ text: "📊 进入面板", url: panelUrl }];
+  let row1 = [{ text: "📊 进入面板", url: PANEL_URL }];
 
   // 仅单实例事件才显示
   if (instanceId) {
     row1.push({
       text: "🌐 实例详情",
-      url: `${panelUrl}/instance/${instanceId}`
+      url: `${PANEL_URL}/instance/${instanceId}`
     });
   }
 
@@ -57,13 +56,13 @@ async function sendMessage(message, title, instanceId = null) {
     if (total === 1) {
       text = parts[0];
     } else if (i === 0) {
-      text = `✂️ <b>第 1/${total} 条</b>\n\n${header}${parts[i]}`;
+      text = `<b>第 1/${total} 条</b>\n\n${header}${parts[i]}`;
     } else {
-      text = `✂️ <b>第 ${i + 1}/${total} 条</b>\n\n${parts[i]}`;
+      text = `<b>第 ${i + 1}/${total} 条</b>\n\n${parts[i]}`;
     }
 
     const body = {
-      chat_id: chatId,
+      chat_id: TG_CHAT_ID,
       text,
       parse_mode: 'HTML',
     };
@@ -105,21 +104,21 @@ async function sendEvent(event) {
     };
 
     const eventMap = {
-      Offline: { cn: '🔴 离线', icon: '🔴 🔴 🔴' },
-      Online:  { cn: '🟢 上线', icon: '🟢 🟢 🟢' },
-      Alert:   { cn: '⚠️ 告警', icon: '⚠️ ⚠️ ⚠️' },
-      Renew:   { cn: '💰 续费', icon: '💰 💰 💰' },
-      Expire:  { cn: '🚨 到期', icon: '🚨 🚨 🚨' },
-      Test:    { cn: '🧪 测试', icon: '🧪 🧪 🧪' },
+      Offline: { cn: '离线', icon: '🔴' },
+      Online:  { cn: '上线', icon: '🟢' },
+      Alert:   { cn: '告警', icon: '⚠️' },
+      Renew:   { cn: '续费', icon: '💰' },
+      Expire:  { cn: '到期', icon: '🚨' },
+      Test:    { cn: '测试', icon: '🧪' },
 
-      // ✔️ 保留 Login / DReport（避免误判）
-      Login:   { cn: '🔐 登录', icon: '🔐 🔐 🔐' },
-      DReport: { cn: '📊 日报', icon: '📊 📊 📊' },
-      WReport: { cn: '📊 周报', icon: '📊 📊 📊' },
-      MReport: { cn: '📊 月报', icon: '📊 📊 📊' }
+      // 保留 Login / DReport（避免误判）
+      Login:   { cn: '登录', icon: '🔐' },
+      DReport: { cn: '日报', icon: '📊' },
+      WReport: { cn: '周报', icon: '📊' },
+      MReport: { cn: '月报', icon: '📊' }
     };
 
-    const ev = eventMap[event.event] || { cn: event.event, icon: 'ℹ️ ℹ️ ℹ️' };
+    const ev = eventMap[event.event] || { cn: event.event, icon: 'ℹ️' };
     const title = `\u200B${ev.icon} 服务器${ev.cn} | Komari 通知`;
 
     let clientInfo = '';
@@ -172,7 +171,7 @@ async function sendEvent(event) {
 
     let message = clientInfo;
 
-    message += `\n📡 <b>状态</b>：${ev.icon.split(' ')[0]} ${event.event} (${ev.cn})`;
+    message += `\n📡 <b>状态</b>：${ev.cn}`;
     message += `\n⏰ <b>时间</b>：${getCSTTime(event.time)}`;
 
     if (event.message && event.message.trim()) {
