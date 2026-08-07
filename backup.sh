@@ -70,6 +70,9 @@ fi
 # 备份相关配置
 #---------------------------------------------------------------
 BACKUP_DAYS="${BACKUP_DAYS:-10}"
+# 备份时排除的数据库文件（默认排除可选指标数据库 metrics.db，
+# 否则备份包易超过 GitHub 单文件 100MB 限制导致推送失败）
+BACKUP_EXCLUDE_DBS="${BACKUP_EXCLUDE_DBS:-metrics.db}"
 RESTORE_STATE_FILE="${RESTORE_STATE_FILE:-${RESTORE_FLAG_FILE:-$RESTORE_STATE_DEFAULT}}"
 LOCK_DIR="${KOMARI_BACKUP_LOCK_DIR:-/tmp/komari-backup-restore.lock}"
 LOCK_TIMEOUT_SECONDS="${KOMARI_LOCK_TIMEOUT_SECONDS:-60}"
@@ -231,6 +234,28 @@ db_type_label() {
     esac
 }
 
+is_excluded_db() {
+    local rel="$1" pat
+    for pat in $BACKUP_EXCLUDE_DBS; do
+        case "$rel" in
+            "$pat") return 0 ;;
+        esac
+    done
+    return 1
+}
+
+remove_excluded_dbs_from_stage() {
+    local staged_db rel_path
+    while IFS= read -r staged_db; do
+        [ -f "$staged_db" ] || continue
+        rel_path="${staged_db#$BACKUP_STAGE_DIR/data/}"
+        if is_excluded_db "$rel_path"; then
+            rm -f "$staged_db" "$staged_db-wal" "$staged_db-shm" "$staged_db-journal" 2>/dev/null || true
+            hint "已从备份中排除数据库: $rel_path"
+        fi
+    done < <(find "$BACKUP_STAGE_DIR/data" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print 2>/dev/null || true)
+}
+
 snapshot_sqlite_files() {
     if ! command -v sqlite3 >/dev/null 2>&1; then
         hint "未找到 sqlite3，数据库文件将使用普通文件快照。"
@@ -240,6 +265,10 @@ snapshot_sqlite_files() {
     while IFS= read -r db_file; do
         [ -f "$db_file" ] || continue
         rel_path="${db_file#$DATA_DIR/}"
+        if is_excluded_db "$rel_path"; then
+            hint "跳过备份排除的数据库: $rel_path"
+            continue
+        fi
         staged_db="$BACKUP_STAGE_DIR/data/$rel_path"
         tmp_db="${staged_db}.snapshot"
         check_file="${tmp_db}.check"
@@ -296,6 +325,7 @@ create_data_snapshot() {
     hint "正在创建数据快照: $DATA_DIR"
     log "创建数据快照: $DATA_DIR"
     cp -a "$DATA_DIR"/. "$BACKUP_STAGE_DIR/data"/ || error "复制数据目录失败。"
+    remove_excluded_dbs_from_stage
     snapshot_sqlite_files
     validate_snapshot_types
 }
