@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      UPSTREAM_REPO: jyucoeng/komari-upstream #原来仓库komari-monitor/komari
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -35,11 +37,11 @@ jobs:
             VERSION="${{ github.event.inputs.komari_version }}"
           else
             # 2. 否则（代码推送 或 定时任务），自动调用 GitHub API 获取上游最新 Release
-            VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/komari-monitor/komari/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
             # 容错：如果 /releases/latest 获取失败，尝试 /releases?per_page=1
             if [ -z "$VERSION" ]; then
               VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/komari-monitor/komari/releases?per_page=10" \
+                "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases?per_page=10" \
                 | python3 -c "
               import json,sys
               d=json.load(sys.stdin)
@@ -78,14 +80,14 @@ jobs:
           PLATFORMS="linux/amd64,linux/arm64"
 
           # 检查至少 amd64 二进制存在，否则跳过
-          if ! wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-amd64" 2>/dev/null; then
+          if ! wget -q --spider "https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${KOMARI_VERSION}/komari-linux-amd64" 2>/dev/null; then
             echo "上游无对应二进制 komari-linux-amd64 for ${KOMARI_VERSION}，跳过构建"
             echo "SKIP_BUILD=true" >> "$GITHUB_ENV"
           else
             echo "上游二进制存在，继续构建"
 
             # 386
-            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-386" 2>/dev/null; then
+            if wget -q --spider "https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${KOMARI_VERSION}/komari-linux-386" 2>/dev/null; then
               PLATFORMS="${PLATFORMS},linux/386"
               echo "✅ 386: 上游有二进制，加入构建"
             else
@@ -93,7 +95,7 @@ jobs:
             fi
 
             # riscv64 (debian:trixie-slim 支持)
-            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-riscv64" 2>/dev/null; then
+            if wget -q --spider "https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${KOMARI_VERSION}/komari-linux-riscv64" 2>/dev/null; then
               PLATFORMS="${PLATFORMS},linux/riscv64"
               echo "✅ riscv64: 上游有二进制，加入构建"
             else
@@ -101,7 +103,7 @@ jobs:
             fi
 
             # loong64 (暂无 base 镜像支持，跳过)
-            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${KOMARI_VERSION}/komari-linux-loong64" 2>/dev/null; then
+            if wget -q --spider "https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${KOMARI_VERSION}/komari-linux-loong64" 2>/dev/null; then
               echo "⚠️ loong64: 上游有二进制，但无 base 镜像支持，跳过"
             else
               echo "⚠️ loong64: 跳过（上游无二进制）"
@@ -145,7 +147,7 @@ jobs:
           # Upstream binary support
           BINS=""
           for arch in amd64 arm64 arm 386 riscv64 loong64; do
-            if wget -q --spider "https://github.com/komari-monitor/komari/releases/download/${VERSION}/komari-linux-${arch}" 2>/dev/null; then
+            if wget -q --spider "https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${VERSION}/komari-linux-${arch}" 2>/dev/null; then
               BINS="${BINS}\`${arch}\`, "
             fi
           done
@@ -153,7 +155,7 @@ jobs:
 
           # Upstream image
           UP_IMG="❌"
-          docker manifest inspect ghcr.io/komari-monitor/komari:${VERSION} >/dev/null 2>&1 && UP_IMG="✅"
+          docker manifest inspect ghcr.io/${{ env.UPSTREAM_REPO }}:${VERSION} >/dev/null 2>&1 && UP_IMG="✅"
 
           # Our manifest platforms
           OURS=$(docker manifest inspect ${IMAGE_NAME}:${VERSION} 2>/dev/null | python3 -c "
@@ -177,7 +179,7 @@ jobs:
           echo ""
           echo "Table Guide:"
           echo "  Version          - Upstream release version tag"
-          echo "  Upstream Image   - Whether ghcr.io/komari-monitor/komari:VERSION exists"
+          echo "  Upstream Image   - Whether ghcr.io/${{ env.UPSTREAM_REPO }}:VERSION exists"
           echo "  Upstream Binaries - Which arch binaries upstream GitHub Release provides"
           echo "  Our Build Platf. - Which platforms in our pushed multi-arch manifest"
           echo "══════════════════════════════════════════════════════════"
@@ -190,7 +192,7 @@ jobs:
 
           # 获取上游最大版本号
           MAX_VERSION=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/komari-monitor/komari/releases?per_page=30" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases?per_page=30" \
             | python3 -c "
           import re, sys, json
           releases = json.load(sys.stdin)
