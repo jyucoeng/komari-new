@@ -20,7 +20,7 @@ jobs:
       contents: read
       packages: write
     env:
-      UPSTREAM_REPO: jyucoeng/komari-upstream #原来仓库komari-monitor/komari
+      UPSTREAM_REPO: komari-monitor/komari
 
     steps:
       - name: ⬇️ Checkout Repository
