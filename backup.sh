@@ -368,6 +368,7 @@ create_data_snapshot() {
 cleanup_old_backups() {
     hint "正在清理旧备份，保留最近 $BACKUP_DAYS 天的数据..."
     local cutoff_seconds cutoff_stamp file file_stamp file_num cutoff_num
+    local total=0 deleted=0
 
     cutoff_seconds=$(($(date -u +%s) - BACKUP_DAYS * 86400))
     cutoff_stamp=$(date -u -d "@$cutoff_seconds" "+%Y-%m-%d-%H%M%S" 2>/dev/null || date -u -r "$cutoff_seconds" "+%Y-%m-%d-%H%M%S" 2>/dev/null || true)
@@ -377,7 +378,10 @@ cleanup_old_backups() {
     fi
     cutoff_num="${cutoff_stamp//-/}"
 
-    list_repo_backup_files | while IFS= read -r file; do
+    # 用进程替换而不是管道：管道会让循环跑在子 shell 里，计数器拿不出来。
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        total=$((total + 1))
         file_stamp=$(basename "$file" | sed -n 's/^komari-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}-[0-9]\{6\}\)\.tar\.gz$/\1/p')
         file_num="${file_stamp//-/}"
         if [ -n "$file_stamp" ] && [ "$file_num" -lt "$cutoff_num" ] 2>/dev/null; then
@@ -385,8 +389,16 @@ cleanup_old_backups() {
                 git rm -f --cached --ignore-unmatch -- "$file" >/dev/null 2>&1 || \
                 git update-index --force-remove -- "$file" >/dev/null 2>&1 || true
             rm -f "$file" 2>/dev/null || true
+            deleted=$((deleted + 1))
+            log "已删除过期远程备份: $file"
         fi
-    done
+    done < <(list_repo_backup_files)
+
+    if [ "$deleted" -gt 0 ]; then
+        hint "远程备份已清理：删除 $deleted 个过期包，保留 $((total - deleted)) 个（保留天数 $BACKUP_DAYS）。"
+    else
+        hint "远程备份无需清理：当前 $total 个，均在 $BACKUP_DAYS 天内。"
+    fi
 }
 
 list_repo_backup_files() {
@@ -417,10 +429,14 @@ cleanup_local_backup_history() {
     esac
     # 0 表示不清理，保留全部
     [ "$keep" -eq 0 ] && return 0
-    [ -d "$local_backup_dir" ] || return 0
+    if [ ! -d "$local_backup_dir" ]; then
+        hint "本地备份目录不存在（$local_backup_dir），跳过本地历史备份清理。"
+        return 0
+    fi
 
     total=$(find "$local_backup_dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')
     if [ "$total" -le "$keep" ]; then
+        hint "本地历史备份 $total 个，未超过保留数量 $keep，无需清理。"
         return 0
     fi
 
