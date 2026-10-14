@@ -82,6 +82,11 @@ BACKUP_EXCLUDE_DBS="${BACKUP_EXCLUDE_DBS:-metrics.db}"
 # 若主题/插件可以重新下载，可自行追加，例如：
 #   BACKUP_EXCLUDE_PATHS="backup theme plugin-data"
 BACKUP_EXCLUDE_PATHS="${BACKUP_EXCLUDE_PATHS:-backup}"
+# 本地历史备份保留数量（DATA_DIR/backup 目录）。
+# 面板自身会把备份包写到该目录，而它不在本脚本的备份范围内，
+# 不清理就会一直堆积占满磁盘。每次备份时按修改时间保留最新的 N 个，
+# 更早的自动删除；设为 0 表示不清理、全部保留。
+LOCAL_BACKUP_FILE_HISTORY_NUM="${LOCAL_BACKUP_FILE_HISTORY_NUM:-3}"
 RESTORE_STATE_FILE="${RESTORE_STATE_FILE:-${RESTORE_FLAG_FILE:-$RESTORE_STATE_DEFAULT}}"
 LOCK_DIR="${KOMARI_BACKUP_LOCK_DIR:-/tmp/komari-backup-restore.lock}"
 LOCK_TIMEOUT_SECONDS="${KOMARI_LOCK_TIMEOUT_SECONDS:-60}"
@@ -392,6 +397,57 @@ list_repo_backup_files() {
     fi
 }
 
+path_mtime() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+}
+
+# 面板自身产生的备份包会持续堆积在 data/backup 下，而该目录已被
+# BACKUP_EXCLUDE_PATHS 排除出备份包，不会随备份上传，因此需要单独的保留策略。
+# 每次备份时按修改时间只保留最新的 LOCAL_BACKUP_FILE_HISTORY_NUM 个。
+cleanup_local_backup_history() {
+    local keep="$LOCAL_BACKUP_FILE_HISTORY_NUM"
+    local local_backup_dir="$DATA_DIR/backup"
+    local total removed=0 entry target cand
+
+    case "$keep" in
+        ''|*[!0-9]*)
+            hint "LOCAL_BACKUP_FILE_HISTORY_NUM 不是有效数字（当前: $keep），跳过本地历史备份清理。"
+            return 0
+            ;;
+    esac
+    # 0 表示不清理，保留全部
+    [ "$keep" -eq 0 ] && return 0
+    [ -d "$local_backup_dir" ] || return 0
+
+    total=$(find "$local_backup_dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$total" -le "$keep" ]; then
+        return 0
+    fi
+
+    hint "正在清理本地历史备份，保留最近 $keep 个（当前共 $total 个）..."
+    while IFS= read -r entry; do
+        target="${entry#* }"
+        [ -n "$target" ] || continue
+        [ -f "$target" ] || continue
+        if rm -f "$target" 2>/dev/null; then
+            removed=$((removed + 1))
+            log "已删除本地历史备份: $(basename "$target")"
+        fi
+    done < <(
+        # 按修改时间从新到旧排序，跳过前 keep 个，其余删除；
+        # 用 stat 取时间而不用 find -printf，兼顾 busybox 与 GNU find。
+        for cand in "$local_backup_dir"/*; do
+            [ -f "$cand" ] || continue
+            case "${cand##*/}" in .*) continue ;; esac
+            printf '%s %s\n' "$(path_mtime "$cand")" "$cand"
+        done | sort -rn | tail -n +$((keep + 1))
+    )
+
+    if [ "$removed" -gt 0 ]; then
+        hint "本地历史备份已保留最近 $keep 个，删除 $removed 个。"
+    fi
+}
+
 write_latest_metadata() {
     local backup_file="$1"
 
@@ -501,6 +557,7 @@ do_backup() {
     rm -f "$BACKUP_ARCHIVE_PATH"
     BACKUP_ARCHIVE_PATH=""
     cleanup_old_backups
+    cleanup_local_backup_history
     write_latest_metadata "$BACKUP_FILE"
 
     # 下面这串 git 操作默认没有任何输出，失败时终端只能看到会话中断，
