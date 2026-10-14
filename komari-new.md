@@ -544,6 +544,33 @@ backup
 
    备份脚本会在打包后立即检查体积：超过 100MB（GitHub 单文件上限）时直接报错退出，而不是等到推送阶段才失败。
 
+3. **超过阈值会自动分卷。** GitHub 对仓库内单个文件有 100MB 硬限制，因此当压缩后体积超过 `BACKUP_SPLIT_SIZE_MB`（默认 `95`）时，备份会被自动切成多卷：
+
+   ```
+   komari-2026-10-14-052117.tar.gz.part-00-of-03
+   komari-2026-10-14-052117.tar.gz.part-01-of-03
+   komari-2026-10-14-052117.tar.gz.part-02-of-03
+   ```
+
+   **还原时不需要任何额外配置** —— 备份库 `README.md` 里仍然只写不带分卷后缀的逻辑名（`komari-2026-10-14-052117.tar.gz`），`restore.sh` 会自动发现分卷、按序号拼接、再走原有的 sha256 校验与解压流程。每个文件名都带 `-of-MM`（总卷数），因此**缺卷会在解压前就被拦下**。
+
+   相关配置：
+
+   | 变量 | 默认值 | 说明 |
+   |---|---|---|
+   | `BACKUP_SPLIT_SIZE_MB` | `95` | 分卷阈值兼单卷大小（MB）。`0` = 禁用分卷 |
+   | `BACKUP_SPLIT_PRE_ESTIMATE` | `1` | 压缩前是否先估算体积（估算只影响走哪条路径，不影响最终结果） |
+   | `BACKUP_ESTIMATE_SAFETY_PCT` | `115` | 估算安全系数（%），宁可高估提前分卷 |
+
+   手工合并分卷包：
+
+   ```bash
+   cat komari-2026-10-14-052117.tar.gz.part-* > komari.tar.gz
+   tar xzf komari.tar.gz
+   ```
+
+   > 手动删除备份时请把同一次的所有 `.part-*` 一起删除；脚本自身的过期清理会自动成组处理，不会留下孤儿分卷。
+
 ---
 
 <a id="6-更新和卸载"></a>
@@ -817,6 +844,9 @@ https://komari.example.com/550e8400-e29b-41d4-a716-446655440000
 | `BACKUP_EXCLUDE_PATHS` | `backup` | 备份时整体排除的目录/文件（相对 `/app/data`，空格分隔） |
 | `BACKUP_EXCLUDE_DBS` | `metrics.db` | 备份时排除的数据库文件（按文件名精确匹配） |
 | `LOCAL_BACKUP_FILE_HISTORY_NUM` | `3` | 本地历史备份保留数量（`/app/data/backup`）；`0` 表示不清理 |
+| `BACKUP_SPLIT_SIZE_MB` | `95` | 分卷阈值兼单卷大小（MB）；`0` 表示禁用分卷 |
+| `BACKUP_SPLIT_PRE_ESTIMATE` | `1` | 压缩前是否估算体积（`0` = 直接压缩后按实测决定） |
+| `BACKUP_ESTIMATE_SAFETY_PCT` | `115` | 估算安全系数（百分比） |
 | `CADDY_PROXY_PORT` | `8001` | Caddy 监听端口 |
 | `KOMARI_DISABLE_WEB_SSH` | `1` | 设为 `0` 启用 Web SSH |
 | `KOMARI_DISABLE_REMOTE` | `1` | 设为 `0` 启用远程命令 |
