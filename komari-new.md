@@ -539,6 +539,7 @@ backup
    ```bash
    BACKUP_EXCLUDE_PATHS="backup theme plugin-data"
    ```
+   由于 `data/backup` 不再进入备份包，它就成了一份**纯本地**的历史记录，需要单独控制保留数量：每次备份时都会按修改时间只保留最新的 `LOCAL_BACKUP_FILE_HISTORY_NUM` 个（默认 3），更早的自动删除。设为 `0` 可关闭该清理、保留全部。手工执行 `bash backup.sh` 与定时任务走的是同一套逻辑，都会触发这次清理。
 2. **备份频率 × 保留天数 = 仓库里累积的包数量。** 例如 `BACKUP_TIME="0 */4 * * *"`（每 4 小时）配合 `BACKUP_DAYS=15`，最多会留下 90 个包；若单包 90MB，仓库就会达到 GB 级。而备份过程中的 `git add / commit / push` 是内存占用最高的一步——在小内存容器里（例如 512MB）很容易被内核 OOM 杀死，表现为**终端输出停在半途、随后 Web Shell 断开**，但脚本本身并不会打印任何错误。建议保持默认的每天一次，并让 `BACKUP_DAYS` 与实际需要匹配。
 
    备份脚本会在打包后立即检查体积：超过 100MB（GitHub 单文件上限）时直接报错退出，而不是等到推送阶段才失败。
@@ -815,6 +816,7 @@ https://komari.example.com/550e8400-e29b-41d4-a716-446655440000
 | `BACKUP_DAYS` | `10` | 备份保留天数 |
 | `BACKUP_EXCLUDE_PATHS` | `backup` | 备份时整体排除的目录/文件（相对 `/app/data`，空格分隔） |
 | `BACKUP_EXCLUDE_DBS` | `metrics.db` | 备份时排除的数据库文件（按文件名精确匹配） |
+| `LOCAL_BACKUP_FILE_HISTORY_NUM` | `3` | 本地历史备份保留数量（`/app/data/backup`）；`0` 表示不清理 |
 | `CADDY_PROXY_PORT` | `8001` | Caddy 监听端口 |
 | `KOMARI_DISABLE_WEB_SSH` | `1` | 设为 `0` 启用 Web SSH |
 | `KOMARI_DISABLE_REMOTE` | `1` | 设为 `0` 启用远程命令 |

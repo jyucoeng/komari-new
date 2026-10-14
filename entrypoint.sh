@@ -175,6 +175,7 @@ write_cron_config() {
         # 只有手工执行 backup.sh 时才会生效。
         write_cron_env_var BACKUP_EXCLUDE_PATHS
         write_cron_env_var BACKUP_EXCLUDE_DBS
+        write_cron_env_var LOCAL_BACKUP_FILE_HISTORY_NUM
         write_cron_env_var KOMARI_LOCK_TIMEOUT_SECONDS
         write_cron_env_var NO_AUTO_RENEW
         write_cron_env_var TZ
