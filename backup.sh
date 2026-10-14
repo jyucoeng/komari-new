@@ -476,6 +476,42 @@ path_size() {
     stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0
 }
 
+# 把字节数格式化成一位小数的 MB（估算值要靠它校准，整数 MB 太粗）
+format_mb() {
+    local bytes="$1"
+    printf '%s.%sMB' "$((bytes / 1048576))" "$(( (bytes % 1048576) * 10 / 1048576 ))"
+}
+
+# 估算结果提示语。两种结果都要打出来：估算虽然只决定走哪条压缩路径（最终产出由
+# 压缩后的实测大小决定），但用户要靠这个数字校准 BACKUP_ESTIMATE_SAFETY_PCT，
+# 只在「超阈值」时显示的话就无从校准了。
+describe_estimate() {
+    local estimated="$1" threshold_bytes="$2"
+    if [ "$estimated" -gt "$threshold_bytes" ]; then
+        printf '预估压缩后约 %s，超过阈值 %sMB → 启用分卷压缩' \
+            "$(format_mb "$estimated")" "$BACKUP_SPLIT_SIZE_MB"
+    else
+        printf '预估压缩后约 %s，未超过阈值 %sMB → 按单文件压缩' \
+            "$(format_mb "$estimated")" "$BACKUP_SPLIT_SIZE_MB"
+    fi
+}
+
+# 估算偏差大到值得提示校准时给出建议，否则无输出。
+#   估低了 → 会上报大安全系数，免得走完单文件压缩才发现要切分（白多一次 I/O）；
+#   估高了 → 可下调安全系数，免得明明很小却去走流式切分。
+# 阈值取 ±50%：默认配置下正常偏差在 +15%~+30%（安全系数叠加保守压缩率所致），不该刷屏。
+describe_estimate_drift() {
+    local estimated="$1" actual="$2"
+    [ "$estimated" -gt 0 ] || return 0
+    if [ "$actual" -gt $((estimated * 3 / 2)) ]; then
+        printf '注意：预估 %s 明显低于实际 %s，如频繁出现可上调 BACKUP_ESTIMATE_SAFETY_PCT（当前 %s）。' \
+            "$(format_mb "$estimated")" "$(format_mb "$actual")" "$BACKUP_ESTIMATE_SAFETY_PCT"
+    elif [ "$estimated" -gt $((actual * 3 / 2)) ]; then
+        printf '注意：预估 %s 明显高于实际 %s，如频繁出现可下调 BACKUP_ESTIMATE_SAFETY_PCT（当前 %s）。' \
+            "$(format_mb "$estimated")" "$(format_mb "$actual")" "$BACKUP_ESTIMATE_SAFETY_PCT"
+    fi
+}
+
 # 批量求文件【表观大小】之和。
 # 不用 du：du 统计的是磁盘占用（按块对齐），theme 这类大量小文件会被严重高估；
 # 也不用 find -printf：busybox 对它支持不全。stat -c %s 在 busybox 与 GNU 上都可用。
@@ -735,6 +771,7 @@ do_backup() {
         hint "正在估算压缩后体积..."
         estimated=$(estimate_compressed_size "$BACKUP_STAGE_DIR/data")
         log "压缩前估算: ${estimated} 字节，分卷阈值 ${split_threshold_bytes} 字节"
+        hint "$(describe_estimate "$estimated" "$split_threshold_bytes")"
     fi
 
     hint "正在压缩数据快照..."
@@ -742,7 +779,6 @@ do_backup() {
 
     if [ "$split_enabled" = "1" ] && [ "$estimated" -gt "$split_threshold_bytes" ]; then
         # ---- 路径②：流式切分，不落地完整归档，峰值磁盘占用减半 ----
-        hint "预估压缩后约 $((estimated / 1048576))MB，超过阈值 ${BACKUP_SPLIT_SIZE_MB}MB → 启用分卷压缩"
         part_count=$(tar czf - -C "$BACKUP_STAGE_DIR" data/ \
             | split_stream "$split_dir" "$split_prefix" "$BACKUP_SPLIT_SIZE_MB") \
             || error "流式分卷压缩失败。"
@@ -799,6 +835,9 @@ do_backup() {
         info "文件已压缩为: $BACKUP_FILE ($((BACKUP_SIZE / 1048576))MB)"
     fi
     log "备份文件: $BACKUP_FILE sha256=$BACKUP_SHA256 size=$BACKUP_SIZE parts=$part_count"
+
+    drift=$(describe_estimate_drift "$estimated" "$BACKUP_SIZE")
+    [ -n "$drift" ] && hint "$drift"
 
     # GitHub 单个文件上限 100MB，超限后 git push 必定被拒绝。
     # 与其在推送阶段把内存耗尽、被 OOM 杀死（终端只看到连接中断），
