@@ -73,6 +73,15 @@ BACKUP_DAYS="${BACKUP_DAYS:-10}"
 # 备份时排除的数据库文件（默认排除可选指标数据库 metrics.db，
 # 否则备份包易超过 GitHub 单文件 100MB 限制导致推送失败）
 BACKUP_EXCLUDE_DBS="${BACKUP_EXCLUDE_DBS:-metrics.db}"
+# 备份时需要整体排除的目录/文件（相对 DATA_DIR，空格分隔）。
+# 默认排除 backup：该目录保存的是面板自身产生的历史备份包，
+# 如果一并打包，就成了「把旧备份装进新备份」，每个包都会随运行次数线性膨胀。
+# 实测 data/backup 有 91MB，会让每个 tar.gz 达到 94MB：既撑爆小内存容器
+# （被 OOM 杀死后容器重启，Web Shell 会直接掉线，看起来像是脚本中断），
+# 也会让备份仓库迅速超过 GitHub 限制。
+# 若主题/插件可以重新下载，可自行追加，例如：
+#   BACKUP_EXCLUDE_PATHS="backup theme plugin-data"
+BACKUP_EXCLUDE_PATHS="${BACKUP_EXCLUDE_PATHS:-backup}"
 RESTORE_STATE_FILE="${RESTORE_STATE_FILE:-${RESTORE_FLAG_FILE:-$RESTORE_STATE_DEFAULT}}"
 LOCK_DIR="${KOMARI_BACKUP_LOCK_DIR:-/tmp/komari-backup-restore.lock}"
 LOCK_TIMEOUT_SECONDS="${KOMARI_LOCK_TIMEOUT_SECONDS:-60}"
@@ -256,6 +265,26 @@ remove_excluded_dbs_from_stage() {
     done < <(find "$BACKUP_STAGE_DIR/data" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print 2>/dev/null || true)
 }
 
+remove_excluded_paths_from_stage() {
+    local rel target
+    for rel in $BACKUP_EXCLUDE_PATHS; do
+        # 去掉前导 ./ 和 /，并拒绝任何可能越出数据目录的路径
+        rel="${rel#./}"
+        rel="${rel#/}"
+        case "$rel" in
+            ""|.|..|../*|*/../*|*/..)
+                hint "忽略非法的备份排除路径: $rel"
+                continue
+                ;;
+        esac
+        target="$BACKUP_STAGE_DIR/data/$rel"
+        if [ -e "$target" ]; then
+            rm -rf "$target" 2>/dev/null || true
+            hint "已从备份中排除: $rel"
+        fi
+    done
+}
+
 snapshot_sqlite_files() {
     if ! command -v sqlite3 >/dev/null 2>&1; then
         hint "未找到 sqlite3，数据库文件将使用普通文件快照。"
@@ -325,6 +354,7 @@ create_data_snapshot() {
     hint "正在创建数据快照: $DATA_DIR"
     log "创建数据快照: $DATA_DIR"
     cp -a "$DATA_DIR"/. "$BACKUP_STAGE_DIR/data"/ || error "复制数据目录失败。"
+    remove_excluded_paths_from_stage
     remove_excluded_dbs_from_stage
     snapshot_sqlite_files
     validate_snapshot_types
@@ -378,6 +408,18 @@ mark_local_restore_state() {
     printf '%s %s\n' "$backup_file" "$backup_sha256" > "$RESTORE_STATE_FILE" 2>/dev/null || true
 }
 
+# 备份仓库里存放的是体积较大的二进制快照，而运行容器的内存往往很小
+# （实测 512MB 上限，komari/caddy/cloudflared/xray 常驻已占约 267MB）。
+# git 打包与增量压缩是备份过程中最吃内存的一步，这里对内存占用设上限，
+# 避免在 git add / commit / push 阶段被内核 OOM 杀死。
+# core.bigFileThreshold 让大文件不做增量压缩，既省内存也几乎没有体积损失。
+configure_git_memory_limits() {
+    git config pack.threads 1
+    git config pack.windowMemory 32m
+    git config pack.deltaCacheSize 16m
+    git config core.bigFileThreshold 1m
+}
+
 prepare_backup_repo() {
     setup_git_auth
     BACKUP_TEMP_DIR=$(mktemp -d "${KOMARI_BACKUP_TMP_DIR:-/tmp}/komari_backup_repo.XXXXXX") || error "无法创建临时仓库目录。"
@@ -404,6 +446,7 @@ prepare_backup_repo() {
         git remote add origin "$repo_url"
     fi
     git remote set-url origin "$repo_url"
+    configure_git_memory_limits
 }
 
 do_backup() {
@@ -439,8 +482,18 @@ do_backup() {
 
     BACKUP_SHA256=$(sha256sum "$BACKUP_ARCHIVE_PATH" | awk '{print $1}')
     BACKUP_SIZE=$(wc -c < "$BACKUP_ARCHIVE_PATH" | tr -d ' ')
-    info "文件已压缩为: $BACKUP_FILE"
+    BACKUP_SIZE_MB=$((BACKUP_SIZE / 1048576))
+    info "文件已压缩为: $BACKUP_FILE (${BACKUP_SIZE_MB}MB)"
     log "备份文件: $BACKUP_FILE sha256=$BACKUP_SHA256 size=$BACKUP_SIZE"
+
+    # GitHub 单个文件上限 100MB，超限后 git push 必定被拒绝。
+    # 与其在推送阶段把内存耗尽、被 OOM 杀死（终端只看到连接中断），
+    # 不如提前失败并给出可操作的提示。
+    if [ "$BACKUP_SIZE" -ge 104857600 ]; then
+        error "备份包已达 ${BACKUP_SIZE_MB}MB，超过 GitHub 单文件 100MB 限制，推送必定失败。请检查 BACKUP_EXCLUDE_PATHS 是否已排除 data 目录下的大文件（当前排除: ${BACKUP_EXCLUDE_PATHS:-无}）。"
+    elif [ "$BACKUP_SIZE" -ge 52428800 ]; then
+        hint "警告：备份包已达 ${BACKUP_SIZE_MB}MB，接近 GitHub 单文件 100MB 限制。"
+    fi
 
     prepare_backup_repo
     cd "$BACKUP_TEMP_DIR" || error "进入临时仓库目录失败。"
@@ -450,6 +503,9 @@ do_backup() {
     cleanup_old_backups
     write_latest_metadata "$BACKUP_FILE"
 
+    # 下面这串 git 操作默认没有任何输出，失败时终端只能看到会话中断，
+    # 看不出卡在哪一步，所以这里显式提示进度。
+    hint "正在提交并推送备份（仓库较大时耗时较久，请勿关闭页面）..."
     git config user.name "$GH_BACKUP_USER"
     git config user.email "$GH_EMAIL"
     git add --sparse --all 2>/dev/null || git add --all
@@ -470,6 +526,7 @@ do_backup() {
         git rebase -X theirs FETCH_HEAD || error "同步远程备份仓库失败。"
     fi
 
+    hint "正在推送到 GitHub..."
     if git push -u origin "$GH_BACKUP_BRANCH"; then
         mark_local_restore_state "$BACKUP_FILE" "$BACKUP_SHA256"
         log "推送成功。"
